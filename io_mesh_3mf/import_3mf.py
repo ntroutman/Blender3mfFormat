@@ -59,6 +59,10 @@ class Import3MF(bpy.types.Operator, bpy_extras.io_utils.ImportHelper):
     files: bpy.props.CollectionProperty(name="File Path", type=bpy.types.OperatorFileListElement)
     directory: bpy.props.StringProperty(subtype='DIR_PATH')
     global_scale: bpy.props.FloatProperty(name="Scale", default=1.0, soft_min=0.001, soft_max=1000.0, min=1e-6, max=1e6)
+    use_color_group: bpy.props.BoolProperty(
+        name="Use Color Group",
+        description="Import object material colors from Color Group. Overrides any Base Materials with same id found.",
+        default=True)
 
     def execute(self, context):
         """
@@ -122,8 +126,8 @@ class Import3MF(bpy.types.Operator, bpy_extras.io_utils.ImportHelper):
                 self.resource_objects = {}
                 self.resource_materials = {}
                 scene_metadata = self.read_metadata(root, scene_metadata)
-                self.read_materials(root)
-                self.read_objects(root)
+                self.read_materials(root, self.use_color_group)
+                self.read_objects(root, files_by_content_type.get(MODEL_MIMETYPE, []))
                 self.build_items(root, scale_unit)
 
         # Avoid saving Title in scene metadata to prevent None value error
@@ -382,7 +386,7 @@ class Import3MF(bpy.types.Operator, bpy_extras.io_utils.ImportHelper):
 
         return metadata
 
-    def read_materials(self, root):
+    def read_materials(self, root, use_color_group):
         """
         Read out all of the material resources from the 3MF document.
 
@@ -432,7 +436,52 @@ class Import3MF(bpy.types.Operator, bpy_extras.io_utils.ImportHelper):
             if len(self.resource_materials[material_id]) == 0:
                 del self.resource_materials[material_id]  # Don't leave empty material sets hanging.
 
-    def read_objects(self, root):
+        # Import materials using Color Group if enabled by user
+        if use_color_group is True:
+            for colorgroup_item in root.iterfind("./3mf:resources/m:colorgroup", MODEL_NAMESPACES):
+                try:
+                    material_id = colorgroup_item.attrib["id"]
+                except KeyError:
+                    log.warning("Encountered a colorgroup item without resource ID.")
+                    continue  # Need to have an ID, or no item can reference to the materials. Skip this one.
+                if material_id in self.resource_materials:
+                    log.warning(f"Duplicate material ID: {material_id}")
+                    continue
+
+                # Use a dictionary mapping indices to resources, some indices may be skipped due to being invalid.
+                self.resource_materials[material_id] = {}
+                index = 0
+
+                # "Base" must be the stupidest name for a material resource. Oh well.
+                for color_item in colorgroup_item.iterfind("./m:color", MODEL_NAMESPACES):
+                    name = color_item.attrib.get("name", "3MF Material")
+                    color = color_item.attrib.get("color")
+                    if color is not None:
+                        # Parse the color. It's a hexadecimal number indicating RGB or RGBA.
+                        color = color.lstrip("#")  # Should start with a #. We'll be lenient if it's not.
+                        try:
+                            color_int = int(color, 16)
+                            # Separate out up to four bytes from this int, from right to left.
+                            b1 = (color_int & 0x000000FF) / 255
+                            b2 = ((color_int & 0x0000FF00) >> 8) / 255
+                            b3 = ((color_int & 0x00FF0000) >> 16) / 255
+                            b4 = ((color_int & 0xFF000000) >> 24) / 255
+                            if len(color) == 6:  # RGB format.
+                                color = (b3, b2, b1, 1.0)  # b1, b2 and b3 are B, G, R respectively. b4 is always 0.
+                            else:  # RGBA format, or invalid.
+                                color = (b4, b3, b2, b1)  # b1, b2, b3 and b4 are A, B, G, R respectively.
+                        except ValueError:
+                            log.warning(f"Invalid color for material {name} of resource {material_id}: {color}")
+                            color = None  # Don't add a color for this material.
+
+                    # Input is valid. Create a resource.
+                    self.resource_materials[material_id][index] = ResourceMaterial(name=name, color=color)
+                    index += 1
+
+                if len(self.resource_materials[material_id]) == 0:
+                    del self.resource_materials[material_id]  # Don't leave empty material sets hanging.
+
+    def read_objects(self, root, model_files=None):
         """
         Reads all repeatable build objects from the resources of an XML root node.
 
@@ -445,6 +494,10 @@ class Import3MF(bpy.types.Operator, bpy_extras.io_utils.ImportHelper):
             except KeyError:
                 log.warning("Object resource without ID!")
                 continue  # ID is required, otherwise the build can't refer to it.
+
+            if objectid in self.resource_objects:
+                log.warning(f"Object id {objectid} already exists. Skipping reading it again.")
+                continue
 
             pid = object_node.attrib.get("pid")  # Material ID.
             pindex = object_node.attrib.get("pindex")  # Index within a collection of materials.
@@ -462,7 +515,7 @@ class Import3MF(bpy.types.Operator, bpy_extras.io_utils.ImportHelper):
 
             vertices = self.read_vertices(object_node)
             triangles, materials = self.read_triangles(object_node, material, pid)
-            components = self.read_components(object_node)
+            components = self.read_components(object_node, model_files)
             metadata = Metadata()
             for metadata_node in object_node.iterfind("./3mf:metadatagroup", MODEL_NAMESPACES):
                 metadata = self.read_metadata(metadata_node, metadata)
@@ -568,7 +621,7 @@ class Import3MF(bpy.types.Operator, bpy_extras.io_utils.ImportHelper):
                 continue  # No fallback this time. Leave out the entire triangle.
         return vertices, materials
 
-    def read_components(self, object_node):
+    def read_components(self, object_node, model_files=None):
         """
         Reads out the components from an XML node of an object.
 
@@ -584,6 +637,28 @@ class Import3MF(bpy.types.Operator, bpy_extras.io_utils.ImportHelper):
             except KeyError:  # ID is required.
                 continue  # Ignore this invalid component.
             transform = self.parse_transformation(component_node.attrib.get("transform", ""))
+
+            try:
+                component_path = component_node.attrib[f"{{{MODEL_PRODUCTION_EXTENSION_NAMESPACE}}}path"].lstrip("/")
+                component_model_found = False
+                for model_file in model_files:
+                    if model_file.name == component_path:
+                        component_model_found = True
+                        document = xml.etree.ElementTree.ElementTree(file=model_file)
+                        if document is None:
+                            log.warning(f"Component id {objectid} referenced model file path {model_file.name}"
+                                        "is corrupt or unreadable.")
+                            continue
+                        root = document.getroot()
+                        self.read_objects(root, model_files)
+                        break
+                if component_model_found is False:
+                    log.error(f"Component id {objectid} referenced model file path {model_file.name} not found in 3MF")
+            except KeyError:  # No file path found.
+                log.info(f"No referenced model file path found for component id {objectid}")
+            except xml.etree.ElementTree.ParseError as e:
+                log.error(f"3MF document in {component_path} is malformed: {str(e)}")
+                continue
 
             result.append(Component(resource_object=objectid, transformation=transform))
         return result
