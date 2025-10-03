@@ -6,7 +6,7 @@ This is a Blender add-on that allows importing and exporting 3MF files.
 
 Installation
 ----
-This add-on requires Blender 2.80 or newer. It is tested on version 2.80, 2.83, 2.93 3.0 and 3.3.
+This add-on requires Blender 2.80 or newer. It is tested on version 2.80, 2.83, 2.93, 3.0, 3.3, and 4.4.
 
 To install this add-on, currently you need to tell Blender where to find a .zip archive with the add-on inside.
 1. Download the latest release from the [releases page](https://github.com/Ghostkeeper/Blender3mfFormat/releases/latest). This is a .zip archive.
@@ -65,3 +65,19 @@ The 3MF specification demands that consumers of 3MF files (i.e. importing 3MF fi
 The 3MF specification is also not designed to handle loading multiple 3MF files at once, or to load 3MF files into existing scenes together with other 3MF files. This add-on will try to load as much as possible, but if there are conflicts with parts of the files, it will load neither. One example is the scene metadata such as the title of the scene. If loading two files with the same title, that title is kept. However when combining files with multiple titles, no title will be loaded.
 
 No 3MF format extensions are currently supported. That is a goal for future development.
+
+Compatibility
+----
+This add-on has been updated to be compatible with Blender 4.4+. It addresses the following API changes:
+
+- Updated initialization of operator classes to properly pass arguments to parent classes
+- Support for Blender 3.2+ view context handling
+- Fixed metadata handling to prevent TypeError when metadata contains None values (v1.1.2)
+
+### Bugfixes
+
+#### v1.1.2
+- Fixed TypeError error when importing 3MF files in Blender 4.4
+- Resolved issue with `Scene.name doesn't support None from string types` error by removing Title metadata from scene before storing
+- Added try-except block to handle any potential exceptions during metadata storage
+- Simplified the fix by addressing the root cause directly in the import process

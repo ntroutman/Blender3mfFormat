@@ -30,6 +30,10 @@ sys.modules["bpy_extras.node_shader_utils"] = unittest.mock.MagicMock()
 sys.modules["idprop"] = unittest.mock.MagicMock()
 sys.modules["idprop.types"] = unittest.mock.MagicMock()
 
+# Import our custom mathutils mock
+from .mock import mathutils
+sys.modules["mathutils"] = mathutils
+
 from .import_3mf import TestImport3MF
 from .export_3mf import TestExport3MF
 from .metadata import TestMetadata
